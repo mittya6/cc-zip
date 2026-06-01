@@ -8,25 +8,20 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    /* ---- Background: 深みのある青 + ぼかしブロブ ---- */
+    /* ---- Background: 中央白 → スカイブルー 円形グラデーション ---- */
     body {
       font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
       min-height: 100vh;
       display: flex;
       justify-content: center;
       padding: 48px 16px;
-      background:
-        radial-gradient(ellipse at 12% 18%, rgba(120, 200, 255, 0.60) 0%, transparent 48%),
-        radial-gradient(ellipse at 88% 75%, rgba(70,  150, 255, 0.55) 0%, transparent 45%),
-        radial-gradient(ellipse at 65%  8%, rgba(180, 225, 255, 0.45) 0%, transparent 40%),
-        radial-gradient(ellipse at 30% 90%, rgba(50,  120, 240, 0.40) 0%, transparent 40%),
-        linear-gradient(145deg, #b8deff 0%, #88bff5 35%, #5598e8 65%, #2a72d8 100%);
+      background: radial-gradient(ellipse at center, #ffffff 0%, #d0eefa 30%, #5ec8f0 100%);
       background-attachment: fixed;
     }
 
     /* ---- Card: frosted glass + 光沢 ---- */
     .card {
-      background: rgba(255,255,255,0.22);
+      background: rgba(255,255,255,0.10);
       backdrop-filter: blur(28px) saturate(160%);
       -webkit-backdrop-filter: blur(28px) saturate(160%);
       border-top:    1px solid rgba(255,255,255,0.90);
@@ -45,12 +40,12 @@
       position: relative;
       overflow: hidden;
     }
-    /* 左側の大きな斜め帯（メインの光沢） */
+    /* 右下に寄せた斜め帯（メインの光沢）— 約1/3だけ右端から覗く */
     .card::before {
       content: '';
       position: absolute;
-      top: -40%;
-      left: 10%;
+      top: 28%;
+      left: 88%;
       width: 32%;
       height: 160%;
       background: linear-gradient(
@@ -65,12 +60,12 @@
       pointer-events: none;
       z-index: 1;
     }
-    /* 右上の細い反射帯（サブの光沢） */
+    /* 右下の細い副光沢 */
     .card::after {
       content: '';
       position: absolute;
-      top: -20%;
-      right: 8%;
+      top: 45%;
+      right: -4%;
       width: 12%;
       height: 80%;
       background: linear-gradient(
@@ -416,7 +411,7 @@
 </head>
 <body>
   <div class="card">
-    <h1>📦 ZIP 作成ツール</h1>
+    <h1>ZIP 作成ツール</h1>
     <p class="subtitle">ファイルを追加してパスワード付き ZIP を作成できます</p>
 
     <div class="drop-zone" id="drop-zone">
@@ -466,7 +461,10 @@
   </div>
 
   <script>
-    const files = [];
+    // displayItems: 表示用リスト
+    //   { type: 'file',   file, zipPath }
+    //   { type: 'folder', name, entries: [{file, zipPath}] }
+    const displayItems = [];
 
     function getPassword() {
       const now = new Date();
@@ -497,38 +495,110 @@
       return map[ext] || '📁';
     }
 
-    function render() {
-      const section  = document.getElementById('file-section');
-      const list     = document.getElementById('file-list');
-      const countEl  = document.getElementById('file-count');
-      const btn      = document.getElementById('download-btn');
+    // フォルダエントリを再帰展開して { file, zipPath }[] を返す
+    async function collectEntries(entry, basePath) {
+      if (entry.isFile) {
+        return new Promise((resolve, reject) => {
+          entry.file(
+            f => resolve([{ file: f, zipPath: basePath + f.name }]),
+            reject
+          );
+        });
+      }
+      if (entry.isDirectory) {
+        const dirPath = basePath + entry.name + '/';
+        const reader = entry.createReader();
+        const allEntries = [];
+        // readEntries はバッチで返すため、空になるまで繰り返す
+        await new Promise((resolve, reject) => {
+          function readBatch() {
+            reader.readEntries(batch => {
+              if (!batch.length) return resolve();
+              allEntries.push(...batch);
+              readBatch();
+            }, reject);
+          }
+          readBatch();
+        });
+        const results = [];
+        for (const child of allEntries) {
+          results.push(...await collectEntries(child, dirPath));
+        }
+        return results;
+      }
+      return [];
+    }
 
-      if (files.length === 0) {
+    // 圧縮用フラットリストを返す
+    function getFileEntries() {
+      const result = [];
+      for (const item of displayItems) {
+        if (item.type === 'file') result.push({ file: item.file, zipPath: item.zipPath });
+        else result.push(...item.entries);
+      }
+      return result;
+    }
+
+    function addDisplayItem(item) {
+      if (item.type === 'file') {
+        if (!displayItems.some(d => d.type === 'file' && d.zipPath === item.zipPath)) {
+          displayItems.push(item);
+        }
+      } else {
+        if (!displayItems.some(d => d.type === 'folder' && d.name === item.name)) {
+          displayItems.push(item);
+        }
+      }
+    }
+
+    function addFiles(fileList) {
+      for (const f of Array.from(fileList)) {
+        addDisplayItem({ type: 'file', file: f, zipPath: f.name });
+      }
+      render();
+    }
+
+    function render() {
+      const section = document.getElementById('file-section');
+      const list    = document.getElementById('file-list');
+      const countEl = document.getElementById('file-count');
+      const btn     = document.getElementById('download-btn');
+      const totalFiles = displayItems.reduce((n, item) =>
+        n + (item.type === 'file' ? 1 : item.entries.length), 0);
+
+      if (displayItems.length === 0) {
         section.style.display = 'none';
       } else {
         section.style.display = 'block';
-        countEl.textContent = `${files.length} ファイル`;
-        list.innerHTML = files.map((f, i) => `
-          <div class="file-item">
-            <span class="file-icon">${getFileIcon(f.name)}</span>
-            <div class="file-info">
-              <div class="file-name" title="${f.name}">${f.name}</div>
-              <div class="file-size">${formatBytes(f.size)}</div>
-            </div>
-            <button class="remove-btn" data-i="${i}" title="削除">✕</button>
-          </div>
-        `).join('');
+        countEl.textContent = `${totalFiles} ファイル`;
+        list.innerHTML = displayItems.map((item, i) => {
+          if (item.type === 'folder') {
+            const totalSize = item.entries.reduce((s, e) => s + e.file.size, 0);
+            return `
+              <div class="file-item">
+                <span class="file-icon">📁</span>
+                <div class="file-info">
+                  <div class="file-name" title="${item.name}">${item.name}</div>
+                  <div class="file-size">${item.entries.length} ファイル・${formatBytes(totalSize)}</div>
+                </div>
+                <button class="remove-btn" data-i="${i}" title="削除">✕</button>
+              </div>
+            `;
+          } else {
+            return `
+              <div class="file-item">
+                <span class="file-icon">${getFileIcon(item.file.name)}</span>
+                <div class="file-info">
+                  <div class="file-name" title="${item.zipPath}">${item.zipPath}</div>
+                  <div class="file-size">${formatBytes(item.file.size)}</div>
+                </div>
+                <button class="remove-btn" data-i="${i}" title="削除">✕</button>
+              </div>
+            `;
+          }
+        }).join('');
       }
-      btn.disabled = files.length === 0;
-    }
-
-    function addFiles(newFiles) {
-      for (const f of newFiles) {
-        if (!files.some(e => e.name === f.name && e.size === f.size)) {
-          files.push(f);
-        }
-      }
-      render();
+      btn.disabled = totalFiles === 0;
     }
 
     // パスワード表示
@@ -546,14 +616,14 @@
 
     // すべて削除
     document.getElementById('clear-all').addEventListener('click', () => {
-      files.length = 0;
+      displayItems.length = 0;
       render();
     });
 
     // ファイルリストのイベント委任（削除ボタン）
     document.getElementById('file-list').addEventListener('click', e => {
       const btn = e.target.closest('.remove-btn');
-      if (btn) { files.splice(Number(btn.dataset.i), 1); render(); }
+      if (btn) { displayItems.splice(Number(btn.dataset.i), 1); render(); }
     });
 
     const dz = document.getElementById('drop-zone');
@@ -563,17 +633,43 @@
     document.addEventListener('dragenter', e => { e.preventDefault(); dz.classList.add('over'); },  true);
     document.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); },  true);
     document.addEventListener('dragleave', e => {
-      // ウィンドウ外へ出たときだけ "over" を消す
       if (!e.relatedTarget || e.relatedTarget === document.documentElement) {
         dz.classList.remove('over');
       }
     }, true);
-    document.addEventListener('drop', e => {
+    document.addEventListener('drop', async e => {
       e.preventDefault();
       e.stopPropagation();
       dz.classList.remove('over');
-      if (e.dataTransfer && e.dataTransfer.files.length > 0) {
-        addFiles(Array.from(e.dataTransfer.files));
+
+      // webkitGetAsEntry でフォルダと個別ファイルを区別して追加
+      // DataTransferItem は await をまたぐと無効になるため、先に全エントリを同期取得する
+      const dtItems = e.dataTransfer?.items;
+      if (dtItems && dtItems.length > 0) {
+        const entries = Array.from(dtItems).map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+        for (const entry of entries) {
+          try {
+            if (entry.isDirectory) {
+              const entries = await collectEntries(entry, '');
+              if (entries.length > 0) {
+                addDisplayItem({ type: 'folder', name: entry.name, entries });
+              }
+            } else {
+              const collected = await collectEntries(entry, '');
+              for (const fe of collected) {
+                addDisplayItem({ type: 'file', ...fe });
+              }
+            }
+          } catch (err) {
+            console.error('エントリ読み込みエラー:', err);
+          }
+        }
+        render();
+        return;
+      }
+      // フォールバック: 通常ファイルのみ
+      if (e.dataTransfer?.files?.length > 0) {
+        addFiles(e.dataTransfer.files);
       }
     }, true);
 
@@ -584,13 +680,14 @@
 
     // ダウンロード
     document.getElementById('download-btn').addEventListener('click', async () => {
-      if (files.length === 0) return;
+      const fileEntries = getFileEntries();
+      if (fileEntries.length === 0) return;
 
-      const password    = getPassword();
-      const btn         = document.getElementById('download-btn');
-      const wrap        = document.getElementById('progress-wrap');
-      const fill        = document.getElementById('progress-fill');
-      const label       = document.getElementById('progress-label');
+      const password = getPassword();
+      const btn      = document.getElementById('download-btn');
+      const wrap     = document.getElementById('progress-wrap');
+      const fill     = document.getElementById('progress-fill');
+      const label    = document.getElementById('progress-label');
 
       btn.disabled = true;
       wrap.style.display = 'block';
@@ -604,19 +701,19 @@
           { password, zipCrypto: true, level: 5 }
         );
 
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i];
-          label.textContent = `(${i + 1}/${files.length})  ${file.name}`;
+        for (let i = 0; i < fileEntries.length; i++) {
+          const { file, zipPath } = fileEntries[i];
+          label.textContent = `(${i + 1}/${fileEntries.length})  ${zipPath}`;
 
-          await zipWriter.add(file.name, new zip.BlobReader(file), {
+          await zipWriter.add(zipPath, new zip.BlobReader(file), {
             onprogress: (loaded, total) => {
-              fill.style.width = `${((i + (total ? loaded / total : 0)) / files.length) * 100}%`;
+              fill.style.width = `${((i + (total ? loaded / total : 0)) / fileEntries.length) * 100}%`;
             },
           });
         }
 
-        label.textContent  = 'ZIP を生成中...';
-        fill.style.width   = '95%';
+        label.textContent = 'ZIP を生成中...';
+        fill.style.width  = '95%';
 
         const blob = await zipWriter.close();
 
@@ -626,8 +723,10 @@
         const url = URL.createObjectURL(blob);
         const a   = document.createElement('a');
         a.href     = url;
-        const baseName = files.length === 1
-          ? files[0].name.replace(/\.[^/.]+$/, '')
+        const baseName = displayItems.length === 1
+          ? (displayItems[0].type === 'folder'
+              ? displayItems[0].name
+              : displayItems[0].file.name.replace(/\.[^/.]+$/, ''))
           : `archive_${password.slice(2)}`;
         a.download = `${baseName}.zip`;
         document.body.appendChild(a);
