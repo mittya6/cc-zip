@@ -529,12 +529,12 @@
       return [];
     }
 
-    // 圧縮用フラットリストを返す
+    // 圧縮用フラットリストを返す（data は file:// で事前読み込みした Uint8Array）
     function getFileEntries() {
       const result = [];
       for (const item of displayItems) {
-        if (item.type === 'file') result.push({ file: item.file, zipPath: item.zipPath });
-        else result.push(...item.entries);
+        if (item.type === 'file') result.push({ file: item.file, zipPath: item.zipPath, data: item.data });
+        else result.push(...item.entries.map(e => ({ ...e })));
       }
       return result;
     }
@@ -551,9 +551,28 @@
       }
     }
 
-    function addFiles(fileList) {
-      for (const f of Array.from(fileList)) {
-        addDisplayItem({ type: 'file', file: f, zipPath: f.name });
+    // FileReader ベースの読み込み（file:// でも動作する古い API）
+    function readFileAsUint8(file) {
+      return new Promise(resolve => {
+        const fr = new FileReader();
+        fr.onload  = () => resolve(new Uint8Array(fr.result));
+        fr.onerror = () => resolve(null);
+        fr.readAsArrayBuffer(file);
+      });
+    }
+
+    async function addFiles(fileList) {
+      const items = Array.from(fileList);
+      // readAsArrayBuffer を await 前に全件起動してアクセス権を確保
+      const reads = items.map(f => readFileAsUint8(f));
+      for (let j = 0; j < items.length; j++) {
+        const data = await reads[j];
+        addDisplayItem({
+          type: 'file',
+          file: items[j],
+          zipPath: items[j].name,
+          data,
+        });
       }
       render();
     }
@@ -637,40 +656,62 @@
         dz.classList.remove('over');
       }
     }, true);
+    function showDropMsg(msg) {
+      const el = document.querySelector('.drop-secondary');
+      const orig = el.textContent;
+      el.textContent = msg;
+      setTimeout(() => { el.textContent = orig; }, 3000);
+    }
+
     document.addEventListener('drop', async e => {
       e.preventDefault();
       e.stopPropagation();
       dz.classList.remove('over');
 
-      // webkitGetAsEntry でフォルダと個別ファイルを区別して追加
-      // DataTransferItem は await をまたぐと無効になるため、先に全エントリを同期取得する
       const dtItems = e.dataTransfer?.items;
-      if (dtItems && dtItems.length > 0) {
-        const entries = Array.from(dtItems).map(i => i.webkitGetAsEntry?.()).filter(Boolean);
-        for (const entry of entries) {
-          try {
-            if (entry.isDirectory) {
-              const entries = await collectEntries(entry, '');
-              if (entries.length > 0) {
-                addDisplayItem({ type: 'folder', name: entry.name, entries });
-              }
-            } else {
-              const collected = await collectEntries(entry, '');
-              for (const fe of collected) {
-                addDisplayItem({ type: 'file', ...fe });
-              }
-            }
-          } catch (err) {
-            console.error('エントリ読み込みエラー:', err);
-          }
-        }
-        render();
+      if (!dtItems || dtItems.length === 0) {
+        if (e.dataTransfer?.files?.length > 0) await addFiles(e.dataTransfer.files);
         return;
       }
-      // フォールバック: 通常ファイルのみ
-      if (e.dataTransfer?.files?.length > 0) {
-        addFiles(e.dataTransfer.files);
+
+      // await をまたぐ前に同期で全情報を取得（DataTransferItem は await 後に無効化される）
+      const rawItems = Array.from(dtItems).map(i => ({
+        entry: i.webkitGetAsEntry?.(),
+        file:  i.getAsFile()
+      }));
+
+      if (location.protocol === 'file:') {
+        // file:// 環境: webkitGetAsEntry でフォルダを検出してスキップ
+        const fileRaws   = rawItems.filter(({ entry }) => !entry?.isDirectory);
+        const hasFolders = rawItems.some(({ entry })  =>  entry?.isDirectory);
+
+        // FileReader を全件同期起動してから await（アクセス権を確保）
+        const reads = fileRaws.map(({ file }) => readFileAsUint8(file));
+        for (let j = 0; j < fileRaws.length; j++) {
+          const data = await reads[j];
+          if (data) addDisplayItem({ type: 'file', file: fileRaws[j].file, zipPath: fileRaws[j].file.name, data });
+        }
+        render();
+        if (hasFolders) showDropMsg('⚠ ローカル環境ではフォルダを展開できません');
+        return;
       }
+
+      // HTTP 環境: フォルダも展開
+      for (const { entry } of rawItems) {
+        if (!entry) continue;
+        try {
+          if (entry.isDirectory) {
+            const collected = await collectEntries(entry, '');
+            if (collected.length > 0) addDisplayItem({ type: 'folder', name: entry.name, entries: collected });
+          } else {
+            const collected = await collectEntries(entry, '');
+            for (const fe of collected) addDisplayItem({ type: 'file', ...fe });
+          }
+        } catch (err) {
+          console.error('エントリ読み込みエラー:', err);
+        }
+      }
+      render();
     }, true);
 
     document.getElementById('file-input').addEventListener('change', e => {
@@ -702,10 +743,15 @@
         );
 
         for (let i = 0; i < fileEntries.length; i++) {
-          const { file, zipPath } = fileEntries[i];
+          const { file, zipPath, data } = fileEntries[i];
           label.textContent = `(${i + 1}/${fileEntries.length})  ${zipPath}`;
 
-          await zipWriter.add(zipPath, new zip.BlobReader(file), {
+          // data あり → file:// で事前読み込み済み Uint8Array を使用
+          // data なし → HTTP 環境のフォルダ内ファイル等は BlobReader で読む
+          const reader = data
+            ? new zip.Uint8ArrayReader(data)
+            : new zip.BlobReader(file);
+          await zipWriter.add(zipPath, reader, {
             onprogress: (loaded, total) => {
               fill.style.width = `${((i + (total ? loaded / total : 0)) / fileEntries.length) * 100}%`;
             },
