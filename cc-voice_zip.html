@@ -421,9 +421,10 @@
         <line x1="12" y1="12" x2="12" y2="21"/>
         <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>
       </svg>
-      <div class="drop-primary">ファイルをここにドロップ</div>
-      <div class="drop-secondary">またはクリックして選択</div>
+      <div class="drop-primary">ファイル・フォルダをここにドロップ</div>
+      <div class="drop-secondary" id="drop-secondary">またはクリックしてファイルを選択 ／ <span id="folder-link" style="text-decoration:underline;cursor:pointer">フォルダを選択</span></div>
       <input type="file" id="file-input" multiple>
+      <input type="file" id="folder-input" webkitdirectory style="display:none">
     </div>
 
     <div id="file-section" style="display:none">
@@ -657,10 +658,45 @@
       }
     }, true);
     function showDropMsg(msg) {
-      const el = document.querySelector('.drop-secondary');
-      const orig = el.textContent;
+      const el = document.getElementById('drop-secondary');
+      const orig = el.innerHTML;
       el.textContent = msg;
-      setTimeout(() => { el.textContent = orig; }, 3000);
+      setTimeout(() => { el.innerHTML = orig; attachFolderLink(); }, 3000);
+    }
+
+    // webkitdirectory で選択したファイル群をフォルダ構造ごと追加
+    async function addFolderFiles(fileList) {
+      const items = Array.from(fileList).filter(f => f.webkitRelativePath);
+      if (!items.length) return;
+
+      // webkitRelativePath の先頭セグメントでフォルダごとにグループ化
+      const groups = new Map();
+      for (const f of items) {
+        const root = f.webkitRelativePath.split('/')[0];
+        if (!groups.has(root)) groups.set(root, []);
+        groups.get(root).push({ file: f, zipPath: f.webkitRelativePath });
+      }
+
+      for (const [folderName, entries] of groups) {
+        if (displayItems.some(d => d.type === 'folder' && d.name === folderName)) continue;
+        // FileReader で事前読み込み（file:// 対応）
+        const reads = entries.map(({ file }) => readFileAsUint8(file));
+        const enriched = [];
+        for (let j = 0; j < entries.length; j++) {
+          const data = await reads[j];
+          enriched.push({ ...entries[j], data: data ?? undefined });
+        }
+        displayItems.push({ type: 'folder', name: folderName, entries: enriched });
+      }
+      render();
+    }
+
+    function attachFolderLink() {
+      const link = document.getElementById('folder-link');
+      if (link) link.addEventListener('click', e => {
+        e.stopPropagation();
+        document.getElementById('folder-input').click();
+      });
     }
 
     document.addEventListener('drop', async e => {
@@ -692,7 +728,7 @@
           if (data) addDisplayItem({ type: 'file', file: fileRaws[j].file, zipPath: fileRaws[j].file.name, data });
         }
         render();
-        if (hasFolders) showDropMsg('⚠ ローカル環境ではフォルダを展開できません');
+        if (hasFolders) showDropMsg('⚠ フォルダは「フォルダを選択」ボタンをご利用ください');
         return;
       }
 
@@ -718,6 +754,13 @@
       addFiles(Array.from(e.target.files));
       e.target.value = '';
     });
+
+    document.getElementById('folder-input').addEventListener('change', async e => {
+      await addFolderFiles(e.target.files);
+      e.target.value = '';
+    });
+
+    attachFolderLink();
 
     // ダウンロード
     document.getElementById('download-btn').addEventListener('click', async () => {
